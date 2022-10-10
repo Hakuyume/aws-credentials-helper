@@ -9,7 +9,7 @@ use ykoath::YubiKey;
 
 #[derive(Parser)]
 pub(super) struct Opts {
-    positional: Vec<String>,
+    arg: Vec<String>,
 }
 
 pub(super) async fn main(opts: Opts) -> anyhow::Result<()> {
@@ -59,9 +59,9 @@ pub(super) async fn main(opts: Opts) -> anyhow::Result<()> {
         .credentials()
         .ok_or_else(|| anyhow::format_err!("no credentials"))?;
 
-    if !opts.positional.is_empty() {
-        let mut command = Command::new(&opts.positional[0]);
-        command.args(&opts.positional[1..]);
+    if !opts.arg.is_empty() {
+        let mut command = Command::new(&opts.arg[0]);
+        command.args(&opts.arg[1..]);
         if let Some(access_key_id) = credentials.access_key_id() {
             command.env("AWS_ACCESS_KEY_ID", access_key_id);
         }
