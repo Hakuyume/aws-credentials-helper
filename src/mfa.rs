@@ -1,77 +1,157 @@
+use aws_types::Credentials;
+use chrono::offset::Utc;
+use chrono::{DateTime, NaiveDateTime};
 use clap::Parser;
-use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use ini::Ini;
 use std::time::{SystemTime, UNIX_EPOCH};
-use tokio::fs;
 use tokio::process::Command;
 use ykoath::calculate::Response;
 use ykoath::YubiKey;
 
 #[derive(Parser)]
 pub(super) struct Opts {
+    #[clap(long, default_value = "12h")]
+    duration: humantime::Duration,
     arg: Vec<String>,
 }
 
 pub(super) async fn main(opts: Opts) -> anyhow::Result<()> {
-    let config = aws_config::load_from_env().await;
-    let iam_client = aws_sdk_iam::Client::new(&config);
-    let sts_client = aws_sdk_sts::Client::new(&config);
+    let profile_name = super::profile_name();
+    let config_file = super::config_file()?;
+    let credentials_file = super::credentials_file()?;
+    tracing::debug!(
+        profile = profile_name,
+        config = config_file.display().to_string(),
+        credentials = credentials_file.display().to_string(),
+    );
 
-    let output = iam_client.list_mfa_devices().send().await?;
-    let mfa_device = output
-        .mfa_devices()
-        .into_iter()
-        .flatten()
-        .next()
-        .ok_or_else(|| anyhow::format_err!("no mfa device"))?;
-    let user_name = mfa_device
-        .user_name()
-        .ok_or_else(|| anyhow::format_err!("no user name"))?;
-    let serial_number = mfa_device
-        .serial_number()
-        .ok_or_else(|| anyhow::format_err!("no serial number"))?;
-    tracing::info!(user_name = user_name, serial_number = serial_number);
+    let config_ini = Ini::load_from_file(&config_file)?;
+    let mut credentials_ini = Ini::load_from_file(&credentials_file)?;
 
-    let path = dirs::home_dir()
-        .ok_or_else(|| anyhow::format_err!("no home directory"))?
-        .join(".aws")
-        .join("credentials-helper.toml");
-    let config = toml::from_slice::<Config>(&fs::read(&path).await?)?;
-    let entry = config.mfa_devices.get(serial_number).ok_or_else(|| {
-        anyhow::format_err!("mfa-devices.{} not in in {}", serial_number, path.display())
-    })?;
+    let mfa_profile_name = format!("{}/mfa", profile_name);
 
-    let token_code = tokio::task::spawn_blocking({
-        let name = entry.ykoath.name.clone();
-        move || ykoath(&name)
-    })
-    .await
-    .unwrap()?;
-    tracing::info!(token_code = token_code);
+    let renew = if let Some(section) = credentials_ini.section(Some(&mfa_profile_name)) {
+        anyhow::ensure!(
+            section.contains_key("aws_access_key_id"),
+            "no aws_access_key_id"
+        );
+        anyhow::ensure!(
+            section.contains_key("aws_secret_access_key"),
+            "no aws_access_key_id"
+        );
+        anyhow::ensure!(
+            section.contains_key("aws_session_token"),
+            "no aws_session_token"
+        );
+        let expiration = DateTime::parse_from_rfc3339(
+            section
+                .get("aws_expiration")
+                .ok_or_else(|| anyhow::format_err!("no aws_expiration"))?,
+        )?;
+        tracing::debug!(expiration = expiration.to_string());
+        Utc::now() + chrono::Duration::seconds((opts.duration.as_secs() / 5) as _) > expiration
+    } else {
+        true
+    };
 
-    let output = sts_client
-        .get_session_token()
-        .serial_number(serial_number)
-        .token_code(token_code)
-        .send()
-        .await?;
-    let credentials = output
-        .credentials()
-        .ok_or_else(|| anyhow::format_err!("no credentials"))?;
+    if renew {
+        let config = {
+            let section = credentials_ini
+                .section(Some(&profile_name))
+                .ok_or_else(|| anyhow::format_err!("no section: {}", profile_name))?;
+            aws_config::from_env()
+                .credentials_provider(Credentials::new(
+                    section
+                        .get("aws_access_key_id")
+                        .ok_or_else(|| anyhow::format_err!("no aws_access_key_id"))?,
+                    section
+                        .get("aws_secret_access_key")
+                        .ok_or_else(|| anyhow::format_err!("no aws_secret_access_key"))?,
+                    section.get("aws_session_token").map(str::to_owned),
+                    section
+                        .get("aws_expiration")
+                        .map(DateTime::parse_from_rfc3339)
+                        .transpose()?
+                        .map(Into::into),
+                    "ProfileFile",
+                ))
+                .load()
+                .await
+        };
+        let iam_client = aws_sdk_iam::Client::new(&config);
+        let sts_client = aws_sdk_sts::Client::new(&config);
 
+        let output = iam_client.list_mfa_devices().send().await?;
+        let mfa_device = output
+            .mfa_devices()
+            .into_iter()
+            .flatten()
+            .next()
+            .ok_or_else(|| anyhow::format_err!("no mfa device"))?;
+        let serial_number = mfa_device
+            .serial_number()
+            .ok_or_else(|| anyhow::format_err!("no serial number"))?;
+        tracing::debug!(serial_number = serial_number);
+
+        let token_code = {
+            let section = config_ini
+                .section(Some(&profile_name))
+                .ok_or_else(|| anyhow::format_err!("no section: {}", profile_name))?;
+            let ykoath_name = section
+                .get("ykoath_name")
+                .ok_or_else(|| anyhow::format_err!("no ykoath_name"))?
+                .to_owned();
+            tracing::info!(ykoath_name = ykoath_name);
+            tokio::task::spawn_blocking(move || ykoath(&ykoath_name))
+                .await
+                .unwrap()?
+        };
+        tracing::info!(token_code = token_code);
+
+        let output = sts_client
+            .get_session_token()
+            .serial_number(serial_number)
+            .token_code(token_code)
+            .duration_seconds(opts.duration.as_secs() as _)
+            .send()
+            .await?;
+        let credentials = output
+            .credentials
+            .ok_or_else(|| anyhow::format_err!("no credentials"))?;
+
+        {
+            let section = credentials_ini
+                .entry(Some(mfa_profile_name.clone()))
+                .or_insert(Default::default());
+            if let Some(access_key_id) = credentials.access_key_id() {
+                section.insert("aws_access_key_id", access_key_id);
+            }
+            if let Some(secret_access_key) = credentials.secret_access_key() {
+                section.insert("aws_secret_access_key", secret_access_key);
+            }
+            if let Some(session_token) = credentials.session_token() {
+                section.insert("aws_session_token", session_token);
+            }
+            if let Some(expiration) = credentials.expiration() {
+                section.insert(
+                    "aws_expiration",
+                    DateTime::<Utc>::from_utc(
+                        NaiveDateTime::from_timestamp(expiration.secs(), expiration.subsec_nanos()),
+                        Utc,
+                    )
+                    .to_rfc3339(),
+                );
+            }
+            credentials_ini.write_to_file(&credentials_file)?;
+        }
+    }
     if !opts.arg.is_empty() {
-        let mut command = Command::new(&opts.arg[0]);
-        command.args(&opts.arg[1..]);
-        if let Some(access_key_id) = credentials.access_key_id() {
-            command.env("AWS_ACCESS_KEY_ID", access_key_id);
-        }
-        if let Some(secret_access_key) = credentials.secret_access_key() {
-            command.env("AWS_SECRET_ACCESS_KEY", secret_access_key);
-        }
-        if let Some(session_token) = credentials.session_token() {
-            command.env("AWS_SESSION_TOKEN", session_token);
-        }
-        anyhow::ensure!(command.status().await?.success());
+        let status = Command::new(&opts.arg[0])
+            .args(&opts.arg[1..])
+            .env("AWS_PROFILE", &mfa_profile_name)
+            .status()
+            .await?;
+        anyhow::ensure!(status.success());
     }
     Ok(())
 }
@@ -94,20 +174,4 @@ fn ykoath(name: &str) -> anyhow::Result<String> {
         response % 10_u32.pow(u32::from(digits)),
         digits as _,
     ))
-}
-
-#[derive(Deserialize, Serialize)]
-#[serde(rename_all = "kebab-case")]
-struct Config {
-    mfa_devices: BTreeMap<String, MfaDevice>,
-}
-
-#[derive(Deserialize, Serialize)]
-struct MfaDevice {
-    ykoath: Ykoath,
-}
-
-#[derive(Deserialize, Serialize)]
-struct Ykoath {
-    name: String,
 }
