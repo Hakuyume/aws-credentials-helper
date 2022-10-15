@@ -6,8 +6,7 @@ use clap::Parser;
 use serde::Serialize;
 use std::io;
 use std::time::{SystemTime, UNIX_EPOCH};
-use ykoath::calculate::Response;
-use ykoath::YubiKey;
+use ykoath::{calculate, calculate_all, YubiKey};
 
 #[derive(Parser)]
 pub(super) struct Opts {
@@ -121,8 +120,27 @@ fn ykoath(name: &str) -> anyhow::Result<String> {
     // https://github.com/Yubico/yubikey-manager/blob/b0b894906e450cff726f7ae0e71b329378b4b0c4/ykman/util.py#L400-L401
     let timestamp = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
     let challenge = (timestamp / 30).to_be_bytes();
-    let Response { digits, response } =
-        yubikey.calculate(true, name.as_bytes(), &challenge, &mut buf)?;
+    tracing::debug!(timestamp = timestamp, challenge = ?challenge);
+
+    let response = yubikey
+        .calculate_all(true, &challenge, &mut buf)?
+        .find(|response| {
+            if let Ok(response) = response {
+                response.name == name.as_bytes()
+            } else {
+                true
+            }
+        })
+        .ok_or_else(|| anyhow::format_err!("missing name: {}", name))??;
+
+    let calculate::Response { digits, response } = match response.inner {
+        calculate_all::Inner::Response(response) => response,
+        calculate_all::Inner::Hotp => anyhow::bail!("HOTP is not supported"),
+        calculate_all::Inner::Touch => {
+            tracing::info!("Touch YubiKey ...");
+            yubikey.calculate(true, name.as_bytes(), &challenge, &mut buf)?
+        }
+    };
 
     // https://github.com/Yubico/yubikey-manager/blob/b0b894906e450cff726f7ae0e71b329378b4b0c4/ykman/util.py#L371
     let response = u32::from_be_bytes(response.try_into().unwrap());
