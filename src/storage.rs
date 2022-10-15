@@ -37,8 +37,10 @@ impl Storage {
 pub(crate) struct Credentials {
     pub(crate) access_key_id: String,
     pub(crate) secret_access_key: String,
-    pub(crate) session_token: String,
-    pub(crate) expiration: DateTime<Utc>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) session_token: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) expiration: Option<DateTime<Utc>>,
 }
 
 impl fmt::Debug for Credentials {
@@ -46,7 +48,7 @@ impl fmt::Debug for Credentials {
         f.debug_struct("Credentials")
             .field("access_key_id", &self.access_key_id)
             .field("secret_access_key", &"***")
-            .field("session_token", &"***")
+            .field("session_token", &self.session_token.as_ref().map(|_| "***"))
             .field("expiration", &self.expiration)
             .finish()
     }
@@ -64,20 +66,26 @@ impl TryFrom<&aws_sdk_sts::model::Credentials> for Credentials {
                 .secret_access_key()
                 .map(str::to_owned)
                 .ok_or_else(|| anyhow::format_err!("missing secret_access_key"))?,
-            session_token: value
-                .session_token()
-                .map(str::to_owned)
-                .ok_or_else(|| anyhow::format_err!("missing session_token"))?,
-            expiration: value
-                .expiration()
-                .map(|expiration| {
-                    DateTime::<Utc>::from_utc(
-                        NaiveDateTime::from_timestamp(expiration.secs(), expiration.subsec_nanos()),
-                        Utc,
-                    )
-                })
-                .ok_or_else(|| anyhow::format_err!("missing expiration"))?,
+            session_token: value.session_token().map(str::to_owned),
+            expiration: value.expiration().map(|expiration| {
+                DateTime::<Utc>::from_utc(
+                    NaiveDateTime::from_timestamp(expiration.secs(), expiration.subsec_nanos()),
+                    Utc,
+                )
+            }),
         })
+    }
+}
+
+impl From<Credentials> for aws_types::Credentials {
+    fn from(value: Credentials) -> Self {
+        Self::new(
+            value.access_key_id,
+            value.secret_access_key,
+            value.session_token,
+            value.expiration.map(Into::into),
+            env!("CARGO_PKG_NAME"),
+        )
     }
 }
 

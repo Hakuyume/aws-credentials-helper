@@ -1,5 +1,4 @@
 use crate::storage::{Credentials, MfaDevice, Storage};
-use aws_config::default_provider;
 use chrono::offset::Utc;
 use chrono::DateTime;
 use clap::Parser;
@@ -11,21 +10,22 @@ use ykoath::{calculate, calculate_all, YubiKey};
 #[derive(Parser)]
 pub(super) struct Opts {
     #[clap(long)]
-    profile: Option<String>,
+    iam: String,
     #[clap(long, default_value = "12h")]
     duration: humantime::Duration,
 }
 
 pub(super) async fn main(opts: Opts) -> anyhow::Result<()> {
-    let credentials_provider = {
-        let mut builder = default_provider::credentials::Builder::default();
-        if let Some(profile) = &opts.profile {
-            builder = builder.profile_name(&profile);
-        }
-        builder.build().await
-    };
+    let mut storage = Storage::load().await?;
+
     let config = aws_config::from_env()
-        .credentials_provider(credentials_provider)
+        .credentials_provider(aws_types::Credentials::from(
+            storage
+                .credentials
+                .get(&opts.iam)
+                .ok_or_else(|| anyhow::format_err!("missing credentials for {}", opts.iam))?
+                .clone(),
+        ))
         .load()
         .await;
     let iam_client = aws_sdk_iam::Client::new(&config);
@@ -43,14 +43,12 @@ pub(super) async fn main(opts: Opts) -> anyhow::Result<()> {
         .ok_or_else(|| anyhow::format_err!("missing serial number"))?;
     tracing::debug!(serial_number = serial_number);
 
-    let mut storage = Storage::load().await?;
-
     let credentials = storage.credentials.get(serial_number).cloned();
     tracing::debug!(credentials = ?credentials);
 
     let credentials = if let Some(credentials) = credentials.filter(|credentials| {
         credentials.expiration
-            > Utc::now() + chrono::Duration::seconds((opts.duration.as_secs() / 5) as _)
+            > Some(Utc::now() + chrono::Duration::seconds((opts.duration.as_secs() / 5) as _))
     }) {
         credentials
     } else {
@@ -62,7 +60,7 @@ pub(super) async fn main(opts: Opts) -> anyhow::Result<()> {
                     .await
                     .unwrap()?
             }
-            None => anyhow::bail!("missing mfa device: {}", serial_number),
+            None => anyhow::bail!("missing mfa device for {}", serial_number),
         };
         tracing::debug!(token_code = token_code);
 
@@ -95,8 +93,8 @@ pub(super) async fn main(opts: Opts) -> anyhow::Result<()> {
         version: u32,
         access_key_id: &'a str,
         secret_access_key: &'a str,
-        session_token: &'a str,
-        expiration: DateTime<Utc>,
+        session_token: Option<&'a str>,
+        expiration: Option<DateTime<Utc>>,
     }
     serde_json::to_writer_pretty(
         io::stdout(),
@@ -104,7 +102,7 @@ pub(super) async fn main(opts: Opts) -> anyhow::Result<()> {
             version: 1,
             access_key_id: &credentials.access_key_id,
             secret_access_key: &credentials.secret_access_key,
-            session_token: &credentials.session_token,
+            session_token: credentials.session_token.as_deref(),
             expiration: credentials.expiration,
         },
     )?;
@@ -131,7 +129,7 @@ fn ykoath(name: &str) -> anyhow::Result<String> {
                 true
             }
         })
-        .ok_or_else(|| anyhow::format_err!("missing name: {}", name))??;
+        .ok_or_else(|| anyhow::format_err!("missing account for {}", name))??;
 
     let calculate::Response { digits, response } = match response.inner {
         calculate_all::Inner::Response(response) => response,

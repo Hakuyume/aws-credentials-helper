@@ -79,6 +79,7 @@ dependencies = [
  "aws-config",
  "aws-sdk-iam",
  "aws-sdk-sts",
+ "aws-types",
  "chrono",
  "clap",
  "dirs",
