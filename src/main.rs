@@ -1,4 +1,5 @@
 mod mfa;
+mod rotate;
 mod storage;
 
 use clap::{Parser, Subcommand};
@@ -14,6 +15,7 @@ struct Opts {
 #[derive(Subcommand)]
 enum Command {
     Mfa(mfa::Opts),
+    Rotate(rotate::Opts),
 }
 
 #[tokio::main]
@@ -26,5 +28,6 @@ async fn main() -> anyhow::Result<()> {
     let opts = Opts::parse();
     match opts.command {
         Command::Mfa(opts) => mfa::main(opts).await,
+        Command::Rotate(opts) => rotate::main(opts).await,
     }
 }

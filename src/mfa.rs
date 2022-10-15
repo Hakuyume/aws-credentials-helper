@@ -4,7 +4,6 @@ use chrono::DateTime;
 use clap::Parser;
 use serde::Serialize;
 use std::io;
-use std::time::{SystemTime, UNIX_EPOCH};
 use ykoath::{calculate, calculate_all, YubiKey};
 
 #[derive(Parser)]
@@ -18,14 +17,13 @@ pub(super) struct Opts {
 pub(super) async fn main(opts: Opts) -> anyhow::Result<()> {
     let mut storage = Storage::load().await?;
 
+    let credentials = storage
+        .credentials
+        .get(&opts.iam)
+        .ok_or_else(|| anyhow::format_err!("missing credentials for {}", opts.iam))?;
+    tracing::debug!(credentials = ?credentials);
     let config = aws_config::from_env()
-        .credentials_provider(aws_types::Credentials::from(
-            storage
-                .credentials
-                .get(&opts.iam)
-                .ok_or_else(|| anyhow::format_err!("missing credentials for {}", opts.iam))?
-                .clone(),
-        ))
+        .credentials_provider(aws_types::Credentials::from(credentials.clone()))
         .load()
         .await;
     let iam_client = aws_sdk_iam::Client::new(&config);
@@ -116,7 +114,7 @@ fn ykoath(name: &str) -> anyhow::Result<String> {
     yubikey.select(&mut buf)?;
 
     // https://github.com/Yubico/yubikey-manager/blob/b0b894906e450cff726f7ae0e71b329378b4b0c4/ykman/util.py#L400-L401
-    let timestamp = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
+    let timestamp = Utc::now().timestamp();
     let challenge = (timestamp / 30).to_be_bytes();
     tracing::debug!(timestamp = timestamp, challenge = ?challenge);
 

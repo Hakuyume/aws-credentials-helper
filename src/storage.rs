@@ -54,6 +54,24 @@ impl fmt::Debug for Credentials {
     }
 }
 
+impl TryFrom<&aws_sdk_iam::model::AccessKey> for Credentials {
+    type Error = anyhow::Error;
+    fn try_from(value: &aws_sdk_iam::model::AccessKey) -> Result<Self, Self::Error> {
+        Ok(Self {
+            access_key_id: value
+                .access_key_id()
+                .map(str::to_owned)
+                .ok_or_else(|| anyhow::format_err!("missing access_key_id"))?,
+            secret_access_key: value
+                .secret_access_key()
+                .map(str::to_owned)
+                .ok_or_else(|| anyhow::format_err!("missing secret_access_key"))?,
+            session_token: None,
+            expiration: None,
+        })
+    }
+}
+
 impl TryFrom<&aws_sdk_sts::model::Credentials> for Credentials {
     type Error = anyhow::Error;
     fn try_from(value: &aws_sdk_sts::model::Credentials) -> Result<Self, Self::Error> {
