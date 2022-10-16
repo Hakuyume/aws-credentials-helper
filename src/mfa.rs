@@ -6,7 +6,7 @@ use serde::Serialize;
 use std::io;
 use ykoath::{calculate, calculate_all, YubiKey};
 
-#[derive(Parser)]
+#[derive(Debug, Parser)]
 pub(super) struct Opts {
     #[clap(long)]
     iam: String,
@@ -113,10 +113,8 @@ fn ykoath(name: &str) -> anyhow::Result<String> {
     let yubikey = YubiKey::connect(&mut buf)?;
     yubikey.select(&mut buf)?;
 
-    // https://github.com/Yubico/yubikey-manager/blob/b0b894906e450cff726f7ae0e71b329378b4b0c4/ykman/util.py#L400-L401
-    let timestamp = Utc::now().timestamp();
-    let challenge = (timestamp / 30).to_be_bytes();
-    tracing::debug!(timestamp = timestamp, challenge = ?challenge);
+    let challenge = (Utc::now().timestamp() / 30).to_be_bytes();
+    tracing::debug!(challenge = ?challenge);
 
     let response = yubikey
         .calculate_all(true, &challenge, &mut buf)?
@@ -133,16 +131,14 @@ fn ykoath(name: &str) -> anyhow::Result<String> {
         calculate_all::Inner::Response(response) => response,
         calculate_all::Inner::Hotp => anyhow::bail!("HOTP is not supported"),
         calculate_all::Inner::Touch => {
-            tracing::info!("Touch YubiKey ...");
+            eprintln!("Touch YubiKey ...");
             yubikey.calculate(true, name.as_bytes(), &challenge, &mut buf)?
         }
     };
 
-    // https://github.com/Yubico/yubikey-manager/blob/b0b894906e450cff726f7ae0e71b329378b4b0c4/ykman/util.py#L371
-    let response = u32::from_be_bytes(response.try_into().unwrap());
     Ok(format!(
         "{:01$}",
-        response % 10_u32.pow(u32::from(digits)),
+        u32::from_be_bytes(response.try_into()?) % 10_u32.pow(u32::from(digits)),
         digits as _,
     ))
 }

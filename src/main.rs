@@ -6,13 +6,13 @@ use clap::{Parser, Subcommand};
 use std::io;
 use tracing_subscriber::EnvFilter;
 
-#[derive(Parser)]
+#[derive(Debug, Parser)]
 struct Opts {
     #[clap(subcommand)]
     command: Command,
 }
 
-#[derive(Subcommand)]
+#[derive(Debug, Subcommand)]
 enum Command {
     Mfa(mfa::Opts),
     Rotate(rotate::Opts),
@@ -26,6 +26,7 @@ async fn main() -> anyhow::Result<()> {
         .init();
 
     let opts = Opts::parse();
+    tracing::debug!(opts = ?opts);
     match opts.command {
         Command::Mfa(opts) => mfa::main(opts).await,
         Command::Rotate(opts) => rotate::main(opts).await,

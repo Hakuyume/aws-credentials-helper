@@ -1,7 +1,7 @@
 use crate::storage::Storage;
 use clap::Parser;
 
-#[derive(Parser)]
+#[derive(Debug, Parser)]
 pub(super) struct Opts {
     #[clap(long)]
     iam: String,
