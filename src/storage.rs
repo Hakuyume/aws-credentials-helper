@@ -85,17 +85,19 @@ impl TryFrom<&aws_sdk_sts::model::Credentials> for Credentials {
                 .map(str::to_owned)
                 .ok_or_else(|| anyhow::format_err!("missing secret_access_key"))?,
             session_token: value.session_token().map(str::to_owned),
-            expiration: value.expiration().map(|expiration| {
-                DateTime::<Utc>::from_utc(
-                    NaiveDateTime::from_timestamp(expiration.secs(), expiration.subsec_nanos()),
-                    Utc,
-                )
-            }),
+            expiration: value
+                .expiration()
+                .map(|expiration| {
+                    NaiveDateTime::from_timestamp_opt(expiration.secs(), expiration.subsec_nanos())
+                        .ok_or_else(|| anyhow::format_err!("invalid expiration"))
+                })
+                .transpose()?
+                .map(|expiration| DateTime::<Utc>::from_utc(expiration, Utc)),
         })
     }
 }
 
-impl From<Credentials> for aws_types::Credentials {
+impl From<Credentials> for aws_credential_types::Credentials {
     fn from(value: Credentials) -> Self {
         Self::new(
             value.access_key_id,

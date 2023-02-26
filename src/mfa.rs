@@ -23,7 +23,7 @@ pub(super) async fn main(opts: Opts) -> anyhow::Result<()> {
         .ok_or_else(|| anyhow::format_err!("missing credentials for {}", opts.iam))?;
     tracing::debug!(credentials = ?credentials);
     let config = aws_config::from_env()
-        .credentials_provider(aws_types::Credentials::from(credentials.clone()))
+        .credentials_provider(aws_credential_types::Credentials::from(credentials.clone()))
         .load()
         .await;
     let iam_client = aws_sdk_iam::Client::new(&config);
